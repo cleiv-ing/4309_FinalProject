@@ -1,19 +1,36 @@
-# CE 4309 Final Project: Wazuh Bank Login Detection with Active Response
+# CE 4309 Final Project - Demo Setup Guide
 
-A complete Wazuh-based intrusion detection and active response system that monitors a Flask bank login application for failed login attempts.
+## What This Guide Covers
+- How to set up the complete Wazuh-based bank login detection system from scratch
+- All commands needed on each VM
+- Architecture overview
+- Credentials
+- Verification checklist
+
+---
+
+## Network Map
+
+| Host | IP | Role |
+|------|-----|------|
+| Attacker (any machine) | any | Sends failed login requests |
+| Defense VM (Windows 11) | 192.168.122.10 | Flask bank app + Wazuh Agent |
+| Wazuh Manager (Ubuntu) | 192.168.122.247 | All-in-one SIEM + Active Response |
+
+---
 
 ## Architecture
 
 ```
-[Attacker] ---POST /login---> [Defense VM: Flask App]
+[Attacker] --POST /login--> [Defense VM: Flask App :5000]
                                   |
                             Writes auth.log
                                   |
-                              [Wazuh Agent]
+                            [Wazuh Agent]
                                   |
                            TCP 1514 (events)
                                   |
-                            [Wazuh Manager]
+                            [Wazuh Manager :192.168.122.247]
                                   |
                     +-------------+-------------+
                     |             |             |
@@ -24,175 +41,132 @@ A complete Wazuh-based intrusion detection and active response system that monit
                                   |
                            [OpenSearch Index]
                                   |
-                          [Wazuh Dashboard]
-                          https://192.168.122.247
+                    [Wazuh Dashboard :443]
+                    https://192.168.122.247
 ```
 
-## Network Map
+---
 
-| Host | IP | Role |
-|------|-----|------|
-| NixOS Host (attacker) | 192.168.122.1 | Runs curl attack commands |
-| Defense VM (Windows 11) | 192.168.122.10 | Flask app + Wazuh Agent |
-| Wazuh Manager (Ubuntu) | 192.168.122.247 | All-in-one manager + AR |
+## Part 1: Wazuh Manager VM Setup (Ubuntu)
 
-## Quick Start (Demo)
+### 1.1 Install Wazuh All-in-One
 
-### 1. Start VMs
-```
-virsh start ce4309-wazuh
-virsh start ce4309-defense-win
-```
-
-### 2. Verify Services
-```bash
-# Wazuh Manager status
-ssh wazuhadmin@192.168.122.247 "sudo /var/ossec/bin/wazuh-control status"
-# Expected: all services running
-
-# Agent connected
-ssh wazuhadmin@192.168.122.247 "sudo /var/ossec/bin/agent_control -l"
-# Expected: Agent 002 (ce4309-defense-win) Active
-
-# Flask app running
-curl -s http://192.168.122.10:5000/
-# Expected: HTML login page returned
-```
-
-### 3. Run Attack (from NixOS host)
-```bash
-for i in 1 2 3 4 5; do
-  curl -s -X POST "http://192.168.122.10:5000/" \
-    -d "username=bankuser&password=wrong$i"
-done
-```
-
-### 4. Verify Detection
-```bash
-# Check alerts in JSON log
-ssh wazuhadmin@192.168.122.247 "sudo grep '100101' /var/ossec/logs/alerts/alerts.json | tail -3"
-
-# Check OpenSearch count
-ssh wazuhadmin@192.168.122.247 "curl -sk -u admin:admin 'https://localhost:9200/wazuh-alerts-*/_count?q=rule.id:100101'"
-
-# View in Dashboard
-# Open https://192.168.122.247 in browser (admin/admin)
-```
-
-### 5. Verify Active Response (Manual)
-```bash
-# Block a test IP
-ssh wazuhadmin@192.168.122.247 "echo '192.168.122.99 add' | sudo /var/ossec/active-response/bin/custom-firewall-drop"
-
-# Confirm block
-ssh wazuhadmin@192.168.122.247 "sudo iptables -L INPUT -n | grep 192.168.122.99"
-# Expected: DROP all -- 192.168.122.99
-
-# Unblock
-ssh wazuhadmin@192.168.122.247 "sudo iptables -D INPUT -s 192.168.122.99 -j DROP"
-```
-
-## Project Structure
-
-```
-4309_FinalProject/
-├── Troy_Login_Attack_Simulation/    # Flask app (on Defense VM)
-│   ├── app.py                       # Bank login application
-│   ├── templates/login.html         # Login page template
-│   └── auth.log                     # Generated auth log (created at runtime)
-├── wazuh/
-│   ├── decoders/
-│   │   ├── 0025-cpp-bank.xml        # Custom decoder for auth.log format
-│   │   └── local_decoder.xml        # Existing local decoder
-│   ├── rules/
-│   │   └── local_rules.xml          # Rules 100100-100102
-│   ├── shared/
-│   │   └── ar.conf                  # Active response configuration
-│   ├── ossec-manager-snippet.xml    # Manager config additions
-│   └── ossec-agent-snippet.xml      # Agent config additions
-├── docs/                            # Project documentation
-└── tools/                           # Utility scripts
-```
-
-## Component Details
-
-### Flask App (Defense VM)
-- **Location**: `C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\app.py`
-- **Credentials**: username=`bankuser`, password=`SecurePass123`
-- **Log format**: `YYYY-MM-DD HH:MM:SS hostname IP=<ip> | USER=<user> | STATUS=<status> | REASON=<reason>`
-- **Log location**: `...\Troy_Login_Attack_Simulation\auth.log`
-
-### Wazuh Decoder (`wazuh/decoders/0025-cpp-bank.xml`)
-Matches pipe-delimited auth.log format and extracts:
-- `srcip` - Source IP address
-- `user` - Username attempted
-- `cppbank_status` - FAILED or SUCCESS
-
-### Wazuh Rules (`wazuh/rules/local_rules.xml`)
-| Rule | Level | Description |
-|------|-------|-------------|
-| 100100 | 0 | CPP Bank login (parent rule) |
-| 100101 | 7 | CPP Bank login failed (triggers on STATUS=FAILED) |
-| 100102 | 3 | CPP Bank login successful (triggers on STATUS=SUCCESS) |
-
-### Active Response (`wazuh/shared/ar.conf`)
-- Rule 100101 triggers `custom-firewall-drop` script
-- Blocks attacker IP via iptables for 300 seconds
-- Script location: `/var/ossec/active-response/bin/custom-firewall-drop`
-
-### OpenSearch Forwarder
-- Python-based forwarder (`/usr/local/bin/wazuh-forwarder.py`)
-- Tails `alerts.json` and indexes to OpenSearch
-- Systemd service: `wazuh-forwarder`
-
-## Full Rebuild Instructions
-
-### Wazuh Manager VM (Ubuntu)
-
-1. **Install Wazuh all-in-one**:
 ```bash
 curl -sO https://packages.wazuh.com/4.7/wazuh-install.sh
 sudo bash wazuh-install.sh -a
 ```
 
-2. **Install custom decoder**:
+After install, Wazuh is at `/var/ossec/` and OpenSearch runs on port 9200.
+
+### 1.2 Deploy Custom Decoder
+
 ```bash
-sudo cp wazuh/decoders/0025-cpp-bank.xml /var/ossec/etc/decoders/
+sudo tee /var/ossec/etc/decoders/0025-cpp-bank.xml > /dev/null << 'EOF'
+<decoder name="cpp-bank">
+  <prematch>IP=</prematch>
+  <regex>IP=(\S+) \| USER=(\S+) \| STATUS=(\S+)</regex>
+  <order>srcip,user,cppbank_status</order>
+</decoder>
+EOF
 sudo chown root:wazuh /var/ossec/etc/decoders/0025-cpp-bank.xml
 ```
 
-3. **Install custom rules**:
+### 1.3 Deploy Custom Rules
+
 ```bash
-sudo cp wazuh/rules/local_rules.xml /var/ossec/etc/rules/
+sudo tee /var/ossec/etc/rules/local_rules.xml > /dev/null << 'EOF'
+<!-- CPP Bank local rules -->
+<group name="cpp-bank">
+  <rule id="100100" level="0">
+    <match>STATUS=</match>
+    <description>CPP Bank login</description>
+  </rule>
+  <rule id="100101" level="7">
+    <if_sid>100100</if_sid>
+    <match>STATUS=FAILED</match>
+    <description>CPP Bank login failed</description>
+  </rule>
+  <rule id="100102" level="3">
+    <if_sid>100100</if_sid>
+    <match>STATUS=SUCCESS</match>
+    <description>CPP Bank login successful</description>
+  </rule>
+</group>
+EOF
 sudo chown root:wazuh /var/ossec/etc/rules/local_rules.xml
 ```
 
-4. **Install active response script**:
+### 1.4 Deploy Active Response Script
+
 ```bash
 sudo tee /var/ossec/active-response/bin/custom-firewall-drop > /dev/null << 'SCRIPT'
 #!/bin/bash
 LOG_FILE="/var/ossec/logs/active-responses.log"
 IPTABLES="/usr/sbin/iptables"
 
-while read -r line; do
-    SRCIP=$(echo "$line" | awk '{print $1}')
-    [ -z "$SRCIP" ] && continue
-    $IPTABLES -A INPUT -s "$SRCIP" -j DROP 2>/dev/null
-    [ $? -eq 0 ] && echo "$(date '+%Y/%m/%d %H:%M:%S') custom-firewall-drop: SUCCESS - Blocked $SRCIP" >> "$LOG_FILE"
-done
+INPUT=$(cat)
+
+# Extract srcip - support both plain text and JSON
+SRCIP=""
+if echo "$INPUT" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}'; then
+    SRCIP=$(echo "$INPUT" | awk '{print $1}')
+else
+    SRCIP=$(echo "$INPUT" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    srcip = d.get('parameters', {}).get('alert', {}).get('data', {}).get('srcip', '')
+    if not srcip:
+        srcip = d.get('srcip', '')
+    print(srcip)
+except:
+    print('')
+" 2>/dev/null)
+fi
+
+[ -z "$SRCIP" ] && echo "$(date '+%Y/%m/%d %H:%M:%S') custom-firewall-drop: ERROR - No srcip" >> "$LOG_FILE" && exit 1
+! echo "$SRCIP" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' && echo "$(date '+%Y/%m/%d %H:%M:%S') custom-firewall-drop: ERROR - Invalid IP: $SRCIP" >> "$LOG_FILE" && exit 1
+
+if $IPTABLES -C INPUT -s "$SRCIP" -j DROP 2>/dev/null; then
+    echo "$(date '+%Y/%m/%d %H:%M:%S') custom-firewall-drop: SKIP - $SRCIP already blocked" >> "$LOG_FILE"
+    exit 0
+fi
+
+$IPTABLES -A INPUT -s "$SRCIP" -j DROP 2>/dev/null
+[ $? -eq 0 ] && echo "$(date '+%Y/%m/%d %H:%M:%S') custom-firewall-drop: SUCCESS - Blocked $SRCIP" >> "$LOG_FILE" || echo "$(date '+%Y/%m/%d %H:%M:%S') custom-firewall-drop: FAILED - Could not block $SRCIP" >> "$LOG_FILE"
 exit 0
 SCRIPT
 sudo chmod +x /var/ossec/active-response/bin/custom-firewall-drop
 sudo chown root:wazuh /var/ossec/active-response/bin/custom-firewall-drop
 ```
 
-5. **Configure active response**:
-```bash
-sudo cp wazuh/shared/ar.conf /var/ossec/etc/shared/ar.conf
-sudo chown root:wazuh /var/ossec/etc/shared/ar.conf
+### 1.5 Configure Active Response in ossec.conf
+
+Add to `/var/ossec/etc/ossec.conf` (before the `<localfile>` section near the end):
+
+```xml
+  <command>
+    <name>custom-firewall-drop</name>
+    <executable>custom-firewall-drop</executable>
+    <timeout_allowed>yes</timeout_allowed>
+  </command>
+
+  <active-response>
+    <command>custom-firewall-drop</command>
+    <location>server</location>
+    <rules_id>100101</rules_id>
+    <timeout>300</timeout>
+  </active-response>
 ```
 
-6. **Install Python forwarder**:
+### 1.6 Configure Agent-Side AR (ar.conf)
+
+```bash
+printf 'restart-ossec0 - restart-ossec.sh - 0\nrestart-ossec0 - restart-ossec.cmd - 0\nrestart-wazuh0 - restart-ossec.sh - 0\nrestart-wazuh0 - restart-ossec.cmd - 0\nrestart-wazuh0 - restart-wazuh - 0\nrestart-wazuh0 - restart-wazuh.exe - 0\nblock-ip300 - block-ip.bat - 300\n' | sudo tee /var/ossec/etc/shared/ar.conf > /dev/null
+```
+
+### 1.7 Install OpenSearch Forwarder
+
 ```bash
 sudo cp tools/wazuh-forwarder.py /usr/local/bin/
 sudo chmod +x /usr/local/bin/wazuh-forwarder.py
@@ -217,25 +191,140 @@ sudo systemctl enable wazuh-forwarder
 sudo systemctl start wazuh-forwarder
 ```
 
-7. **Restart Wazuh**:
+### 1.8 Install Auto-Response Watcher
+
+```bash
+sudo cp tools/wazuh-auto-response.py /usr/local/bin/
+sudo chmod +x /usr/local/bin/wazuh-auto-response.py
+
+sudo cp tools/wazuh-auto-response.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable wazuh-auto-response
+sudo systemctl start wazuh-auto-response
+```
+
+### 1.9 Disable UFW
+
+```bash
+sudo ufw disable
+```
+
+### 1.10 Restart Wazuh
+
 ```bash
 sudo /var/ossec/bin/wazuh-control restart
 ```
 
-### Defense VM (Windows 11)
+---
 
-1. **Install Python 3** and Flask:
+## Part 2: Defense VM Setup (Windows 11)
+
+### 2.1 Install Python and Flask
+
 ```powershell
 pip install flask
 ```
 
-2. **Create the Flask app** at `C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\app.py`
+### 2.2 Create Flask App
 
-3. **Install Wazuh Agent**:
-   - Download from https://www.wazuh.com/downloads/
-   - Set manager address to `192.168.122.247`
+Create folder `C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\`
 
-4. **Configure agent** (`C:\Program Files (x86)\ossec-agent\ossec.conf`):
+Create `app.py`:
+
+```python
+from datetime import datetime
+import os
+from pathlib import Path
+from flask import Flask, render_template, request
+
+APP_DIR = Path(__file__).resolve().parent
+LOG_FILE = Path(r'C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\auth.log')
+
+VALID_USERNAME = os.environ.get('CPPBANK_USERNAME', 'bankuser')
+VALID_PASSWORD = os.environ.get('CPPBANK_PASSWORD', 'SecurePass123')
+
+app = Flask(__name__)
+
+def clean_log_value(value):
+    return str(value).replace('|', '/').replace('\r', ' ').replace('\n', ' ').strip()
+
+def get_client_ip():
+    if os.environ.get('CPPBANK_TRUST_PROXY') == '1':
+        forwarded_for = request.headers.get('X-Forwarded-For', '')
+        if forwarded_for:
+            return clean_log_value(forwarded_for.split(',')[0])
+    return clean_log_value(request.remote_addr or 'unknown')
+
+def write_log(username, ip, status, reason):
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_entry = (
+        f'{timestamp} defense-vm IP={clean_log_value(ip)} | USER={clean_log_value(username)} | '
+        f'STATUS={clean_log_value(status)} | REASON={clean_log_value(reason)}\n'
+    )
+    with LOG_FILE.open('a', encoding='utf-8') as file:
+        file.write(log_entry)
+
+@app.get('/healthz')
+def healthz():
+    return {'status': 'ok'}
+
+@app.route('/', methods=['GET', 'POST'])
+def login():
+    message = ''
+    if request.method == 'POST':
+        username = request.form.get('username', '')
+        password = request.form.get('password', '')
+        ip = get_client_ip()
+        if username == VALID_USERNAME and password == VALID_PASSWORD:
+            write_log(username, ip, 'SUCCESS', 'Valid login')
+            message = 'Login successful. Welcome to CPP Bank.'
+        else:
+            write_log(username, ip, 'FAILED', 'Invalid username or password')
+            message = 'Login failed. Invalid username or password.'
+    return render_template('login.html', message=message)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+```
+
+Create `templates\login.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CPP Bank Login</title>
+    <style>
+        body { align-items: center; background: #eef2f3; display: flex; justify-content: center; min-height: 100vh; margin: 0; font-family: Arial, sans-serif; }
+        .login-box { background: white; border-radius: 10px; box-shadow: 0 0 10px gray; max-width: 350px; padding: 25px; text-align: center; width: calc(100% - 32px); }
+        input { box-sizing: border-box; margin: 10px 0; padding: 10px; width: 100%; }
+        button { background-color: #004080; border: none; color: white; cursor: pointer; padding: 10px 20px; }
+        .message { font-weight: bold; margin-top: 15px; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2>CPP Bank Login</h2>
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required><br>
+            <input type="password" name="password" placeholder="Password" required><br>
+            <button type="submit">Login</button>
+        </form>
+        <div class="message">{{ message }}</div>
+    </div>
+</body>
+</html>
+```
+
+### 2.3 Install and Configure Wazuh Agent
+
+Download from https://www.wazuh.com/downloads/ and install.
+
+Edit `C:\Program Files (x86)\ossec-agent\ossec.conf`:
+
 ```xml
 <ossec_config>
   <client>
@@ -244,7 +333,22 @@ pip install flask
       <port>1514</port>
       <protocol>tcp</protocol>
     </server>
+    <config-profile>windows, windows10</config-profile>
+    <crypto_method>aes</crypto_method>
+    <notify_time>20</notify_time>
+    <time-reconnect>60</time-reconnect>
+    <auto_restart>yes</auto_restart>
   </client>
+  <client_buffer>
+    <disabled>no</disabled>
+    <queue_size>5000</queue_size>
+    <events_per_second>500</events_per_second>
+  </client_buffer>
+  <active-response>
+    <disabled>no</disabled>
+    <ca_store>wpk_root.pem</ca_store>
+    <ca_verification>yes</ca_verification>
+  </active-response>
   <localfile>
     <log_format>syslog</log_format>
     <location>C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\auth.log</location>
@@ -252,18 +356,20 @@ pip install flask
 </ossec_config>
 ```
 
-5. **Start the agent**:
-```powershell
-Start-Service -Name WazuhSvc
-```
+### 2.4 Start Services
 
-6. **Start the Flask app**:
 ```powershell
+# Start Flask
 cd C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation
 python app.py
+
+# Start Wazuh Agent
+Start-Service WazuhSvc
 ```
 
-## Credentials
+---
+
+## Part 3: Credentials
 
 | Service | Username | Password |
 |---------|----------|----------|
@@ -271,70 +377,123 @@ python app.py
 | Wazuh Dashboard | admin | admin |
 | OpenSearch | admin | admin |
 | Wazuh API | wazuh | wazuh |
-| Wazuh Manager SSH | wazuhadmin | 1747 |
+| Manager SSH | wazuhadmin | 1747 |
 | Defense VM SSH | defense | 7471 |
 
-## Verification Checklist
+---
 
-- [ ] `virsh list --all` shows both VMs running
-- [ ] `ssh wazuhadmin@192.168.122.247 "sudo /var/ossec/bin/wazuh-control status"` - all running
-- [ ] `ssh wazuhadmin@192.168.122.247 "sudo /var/ossec/bin/agent_control -l"` - Agent 002 Active
-- [ ] `curl http://192.168.122.10:5000/` - returns login page
-- [ ] Send 5 failed logins via curl
-- [ ] `ssh wazuh "sudo grep '100101' /var/ossec/logs/alerts/alerts.json | tail -1"` - shows alert with srcip
-- [ ] `curl -sk -u admin:admin 'https://localhost:9200/wazuh-alerts-*/_count?q=rule.id:100101'` - count > 0
-- [ ] Manual AR test blocks IP in iptables
-- [ ] https://192.168.122.247 dashboard shows alerts
+## Part 4: Verification Checklist
+
+```bash
+# 1. Manager services
+ssh wazuh "sudo /var/ossec/bin/wazuh-control status"
+
+# 2. Agent connected
+ssh wazuh "sudo /var/ossec/bin/agent_control -l"
+
+# 3. Flask responding
+curl -s http://192.168.122.10:5000/
+
+# 4. Send attack
+for i in 1 2 3 4 5; do curl -s -X POST "http://192.168.122.10:5000/" -d "username=test&password=wrong$i"; done
+
+# 5. Check alerts (wait 10s)
+ssh wazuh "sudo grep '100101' /var/ossec/logs/alerts/alerts.json | tail -1"
+
+# 6. Check OpenSearch
+ssh wazuh "curl -sk -u admin:admin 'https://localhost:9200/wazuh-alerts-*/_count?q=rule.id:100101'"
+
+# 7. Check AR triggered
+ssh wazuh "sudo tail -3 /var/ossec/logs/active-responses.log"
+
+# 8. Check iptables
+ssh wazuh "sudo iptables -L INPUT -n | grep DROP"
+
+# 9. Open Dashboard
+# https://192.168.122.247 (admin/admin)
+```
+
+---
+
+## Part 5: Demo Script
+
+### Terminal 1 - Watch AR triggers:
+```bash
+ssh wazuh "sudo tail -f /var/ossec/logs/active-responses.log"
+```
+
+### Terminal 2 - Send attack:
+```bash
+for i in 1 2 3 4 5; do curl -s -X POST "http://192.168.122.10:5000/" -d "username=attacker&password=wrong$i"; done
+```
+
+### What happens:
+1. Flask returns "Login failed" messages
+2. AR log shows `SUCCESS - Blocked <IP>` within ~5-10 seconds
+3. iptables shows DROP rule: `ssh wazuh "sudo iptables -L INPUT -n | grep DROP"`
+4. Wazuh Dashboard (https://192.168.122.247) shows alerts with srcip data
+
+### Cleanup:
+```bash
+ssh wazuh "sudo iptables -D INPUT -s <ATTACKER_IP> -j DROP"
+```
+
+---
 
 ## Troubleshooting
 
-### No alerts after attack
-```bash
-# Check agent is forwarding
-ssh wazuhadmin@192.168.122.247 "sudo tail /var/ossec/logs/archives/archives.log | grep 002"
-
-# Check decoder is matching
-ssh wazuhadmin@192.168.122.247 "sudo /var/ossec/bin/wazuh-logtest" then paste a log line
-
-# Restart agent on Windows
-ssh defense@192.168.122.10 "powershell -Command Restart-Service WazuhSvc"
-```
-
-### No alerts in OpenSearch
-```bash
-# Check forwarder is running
-ssh wazuhadmin@192.168.122.247 "sudo systemctl status wazuh-forwarder"
-
-# Reset forwarder offset
-ssh wazuhadmin@192.168.122.247 "echo 0 | sudo tee /var/lib/wazuh-forwarder/offset.txt"
-ssh wazuhadmin@192.168.122.247 "sudo systemctl restart wazuh-forwarder"
-```
-
 ### Agent not connecting
 ```powershell
-# On Defense VM, check agent log
-Get-Content "C:\Program Files (x86)\ossec-agent\logs\ossec.log" -Tail 20
-
-# Re-enroll if needed
-& "C:\Program Files (x86)\ossec-agent\agent-auth.exe" -m 192.168.122.247
+# On Defense VM:
 Restart-Service WazuhSvc
 ```
 
-### Flask app not writing logs
-```powershell
-# Check file exists
-Test-Path "C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\auth.log"
+### No alerts
+```bash
+# Check auth.log has entries
+ssh defense@192.168.122.10 "type 'C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\auth.log'" | tail -3
 
-# Check app is listening
-netstat -ano | findstr 5000
+# Test decoder manually
+ssh wazuh "echo '2026-05-06 12:00:00 defense-vm IP=10.0.0.1 | USER=test | STATUS=FAILED | REASON=bad' | sudo /var/ossec/bin/wazuh-logtest"
 ```
 
-## Known Limitations
+### No AR trigger
+```bash
+# Check watcher
+ssh wazuh "sudo systemctl status wazuh-auto-response"
 
-- **Auto-trigger Active Response**: Wazuh has a known limitation where auto-triggering active response on agent-generated alerts may not work reliably. The manual trigger (`echo '<IP> add' | custom-firewall-drop`) always works and can be demonstrated as proof of concept.
-- **Filebeat**: The bundled Filebeat has a `pthread_create` permission error in this environment. The Python forwarder replaces it.
+# Manual AR test
+ssh wazuh "echo '10.0.0.99 add' | sudo /var/ossec/active-response/bin/custom-firewall-drop"
+ssh wazuh "sudo iptables -L INPUT -n | grep 10.0.0.99"
+ssh wazuh "sudo iptables -D INPUT -s 10.0.0.99 -j DROP"
+```
 
-## Team
+### OpenSearch not indexing
+```bash
+ssh wazuh "sudo systemctl status wazuh-forwarder"
+```
 
-- Giovanni (giovanni-wazuh-active-response branch)
-- CE 4309 Cybersecurity Course
+---
+
+## File Locations
+
+### Wazuh Manager (192.168.122.247)
+| File | Path |
+|------|------|
+| Decoder | `/var/ossec/etc/decoders/0025-cpp-bank.xml` |
+| Rules | `/var/ossec/etc/rules/local_rules.xml` |
+| AR Script | `/var/ossec/active-response/bin/custom-firewall-drop` |
+| AR Config | `/var/ossec/etc/shared/ar.conf` |
+| ossec.conf AR | `/var/ossec/etc/ossec.conf` |
+| Forwarder | `/usr/local/bin/wazuh-forwarder.py` |
+| Watcher | `/usr/local/bin/wazuh-auto-response.py` |
+| Alerts | `/var/ossec/logs/alerts/alerts.json` |
+| AR Log | `/var/ossec/logs/active-responses.log` |
+
+### Defense VM (192.168.122.10)
+| File | Path |
+|------|------|
+| Flask App | `C:\Users\defense\Desktop\4309_FinalProject\Troy_Login_Attack_Simulation\app.py` |
+| Login Page | `...\templates\login.html` |
+| Auth Log | `...\auth.log` |
+| Agent Config | `C:\Program Files (x86)\ossec-agent\ossec.conf` |
