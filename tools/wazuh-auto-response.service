@@ -1,0 +1,15 @@
+[Unit]
+Description=Wazuh Auto-Response Watcher
+After=network.target wazuh-manager.service
+Wants=wazuh-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/wazuh-auto-response.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
