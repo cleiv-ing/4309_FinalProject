@@ -1,0 +1,5 @@
+<decoder name="cpp-bank">
+  <prematch>IP=</prematch>
+  <regex>IP=(\S+) \| USER=(\S+) \| STATUS=(\S+)</regex>
+  <order>srcip,user,cppbank_status</order>
+</decoder>

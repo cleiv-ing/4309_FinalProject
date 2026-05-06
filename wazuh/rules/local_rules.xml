@@ -1,0 +1,17 @@
+<!-- CPP Bank local rules -->
+<group name="cpp-bank">
+  <rule id="100100" level="0">
+    <match>STATUS=</match>
+    <description>CPP Bank login</description>
+  </rule>
+  <rule id="100101" level="7">
+    <if_sid>100100</if_sid>
+    <match>STATUS=FAILED</match>
+    <description>CPP Bank login failed</description>
+  </rule>
+  <rule id="100102" level="3">
+    <if_sid>100100</if_sid>
+    <match>STATUS=SUCCESS</match>
+    <description>CPP Bank login successful</description>
+  </rule>
+</group>
