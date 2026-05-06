@@ -1,0 +1,6 @@
+*.pyc
+__pycache__/
+logs/
+Troy_Login_Attack_Simulation/__pycache__/
+Troy_Login_Attack_Simulation/logs/
+.venv/
