@@ -1,71 +1,96 @@
 #!/bin/bash
 # CE 4309 Final Project - Demo Script
-# Run this on the NixOS host
+# 
+# Architecture:
+#   Attacker (NixOS) -> Windows VM (Flask app) -> Wazuh Manager (detection) -> OpenSearch + Dashboard
+#
+# IMPORTANT: Dashboard must be started AFTER attacks to avoid VM overload
+
+set -e
+
+WAZUH="wazuh"
+DASHBOARD_URL="https://192.168.122.247"
+OS_URL="https://192.168.122.247:9200"
 
 echo "============================================"
-echo "  CE 4309 Final Project - Demo Script"
+echo "  CE 4309 Final Project - Demo"
 echo "============================================"
 
-# Step 1: Verify VMs are running
+# Step 1: Verify VMs
 echo ""
-echo "Step 1: Checking VMs..."
-ping -c 1 -W 2 192.168.122.10 > /dev/null 2>&1 && echo "  Defense VM: OK" || echo "  Defense VM: DOWN"
-ping -c 1 -W 2 192.168.122.247 > /dev/null 2>&1 && echo "  Wazuh VM: OK" || echo "  Wazuh VM: DOWN"
+echo "[1] Checking VMs..."
+ssh -o ConnectTimeout 5 $WAZUH "echo ok" >/dev/null 2>&1 && echo "  Wazuh VM: OK" || echo "  Wazuh VM: DOWN"
+curl -s http://192.168.122.10:5000/ >/dev/null 2>&1 && echo "  Defense VM: OK" || echo "  Defense VM: DOWN"
 
-# Step 2: Verify services
+# Step 2: Clean state
 echo ""
-echo "Step 2: Checking services..."
-ssh -o ConnectTimeout 5 wazuh "sudo systemctl is-active wazuh-analysisd wazuh-execd wazuh-remoted wazuh-db" 2>/dev/null
-ssh -o ConnectTimeout 5 wazuh "sudo /var/ossec/bin/agent_control -l" 2>/dev/null
+echo "[2] Cleaning state..."
+ssh $WAZUH "sudo iptables -F INPUT" 2>/dev/null
+ssh $WAZuh "sudo /var/ossec/bin/agent_control -l" 2>/dev/null | grep "002" && echo "  Agent 002: Active" || echo "  Agent 002: Check needed"
 
-# Step 3: Start AI SOC Agent
+# Step 3: Ensure dashboard is OFF during attacks
 echo ""
-echo "Step 3: Starting AI SOC Agent..."
-cd /var/lib/hermes-agent-official/workspace
-python3 -u ai-soc-agent.py > /tmp/ai-agent.log 2>&1 &
-AGENT_PID=$!
-echo "  Agent started (PID: $AGENT_PID)"
-sleep 5
-cat /tmp/ai-agent.log
+echo "[3] Ensuring dashboard is off during attacks..."
+DASH_STATUS=$(ssh $WAZUH "sudo systemctl is-active wazuh-dashboard" 2>/dev/null)
+if [ "$DASH_STATUS" = "active" ]; then
+    echo "  Stopping dashboard..."
+    ssh $WAZUH "sudo systemctl stop wazuh-dashboard" 2>/dev/null
+fi
+echo "  Dashboard: OFF"
 
 # Step 4: Send attacks
 echo ""
-echo "Step 4: Sending attack (5 failed logins)..."
+echo "[4] Sending brute force attack (5 failed logins)..."
 for i in 1 2 3 4 5; do
-  curl -s -X POST "http://192.168.122.10:5000/" -d "username=demo&password=wrong$i" > /dev/null
+    curl -s -X POST "http://192.168.122.10:5000/" -d "username=attacker&password=wrong$i" > /dev/null
+    sleep 2
 done
-echo "  Sent"
+echo "  Sent 5 failed login attempts"
 
-# Step 5: Wait and show results
+# Step 5: Wait for detection
 echo ""
-echo "Step 5: Waiting for detection (15s)..."
-sleep 15
+echo "[5] Waiting for detection (10s)..."
+sleep 10
 
+# Step 6: Show results
 echo ""
-echo "=== AI SOC Agent Output ==="
-cat /tmp/ai-agent.log
-
+echo "[6] Results..."
 echo ""
-echo "=== Active Response Log ==="
-ssh -o ConnectTimeout 5 wazuh "sudo tail -5 /var/ossec/logs/active-responses.log" 2>/dev/null
-
-echo ""
-echo "=== Blocked IPs ==="
-ssh -o ConnectTimeout 5 wazuh "sudo iptables -L INPUT -n | grep DROP" 2>/dev/null
+echo "--- Detected Alerts ---"
+ALERT_COUNT=$(curl -sk -u admin:admin "$OS_URL/wazuh-alerts-*/_count?q=rule.id:100101" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['count'])" 2>/dev/null)
+echo "  OpenSearch: $ALERT_COUNT alerts indexed"
 
 echo ""
-echo "=== OpenSearch Alert Count ==="
-curl -sk -u admin:admin "https://192.168.122.247:9200/wazuh-alerts-*/_count?q=rule.id:100101" 2>/dev/null
+echo "--- Alert Details (srcip, user, status) ---"
+curl -sk -u admin:admin -X POST "$OS_URL/wazuh-alerts-*/_search" \
+  -H "Content-Type: application/json" \
+  -d '{"query":{"term":{"rule.id":"100101"}},"size":5,"sort":[{"timestamp":{"order":"desc"}}]}' 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for h in d.get('hits',{}).get('hits',[]):
+    s = h.get('_source',{})
+    data = s.get('data',{})
+    print(f'  {s.get(\"timestamp\",\"?\")[:19]} | srcip={data.get(\"srcip\",\"?\")} | user={data.get(\"dstuser\",\"?\")} | status={data.get(\"cppbank_status\",\"?\")}')
+" 2>/dev/null || echo "  (query failed)"
+
+echo ""
+echo "--- Active Response ---"
+ssh $WAZUH "sudo tail -3 /var/ossec/logs/active-responses.log" 2>/dev/null || echo "  (log unavailable)"
+
+echo ""
+echo "--- Blocked IPs ---"
+ssh $WAZUH "sudo iptables -L INPUT -n | grep DROP" 2>/dev/null || echo "  (no blocks or iptables unavailable)"
+
+# Step 7: Start dashboard for visual demo
+echo ""
+echo "[7] Starting dashboard for visual demo..."
+ssh $WAZUH "sudo systemctl start wazuh-dashboard" 2>/dev/null
+echo "  Dashboard: ON"
+echo "  Open: $DASHBOARD_URL (admin/admin)"
 
 echo ""
 echo "============================================"
-echo "  Dashboard: https://192.168.122.247"
-echo "  Credentials: admin / admin"
+echo "  Demo complete!"
+echo "  Dashboard: $DASHBOARD_URL"
+echo "  OpenSearch: $OS_URL"
 echo "============================================"
-
-# Cleanup
-echo ""
-read -p "Press Enter to cleanup (unblock IPs and stop agent)..."
-kill $AGENT_PID 2>/dev/null
-ssh -o ConnectTimeout 5 wazuh "sudo iptables -F INPUT" 2>/dev/null
-echo "Cleanup done."
