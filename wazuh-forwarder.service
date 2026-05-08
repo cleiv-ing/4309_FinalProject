@@ -1,12 +1,19 @@
 [Unit]
 Description=Wazuh Alert Forwarder
 After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /usr/local/bin/wazuh-forwarder.py
 Restart=always
-RestartSec=10
+RestartSec=5
+StandardOutput=append:/var/log/wazuh-forwarder.log
+StandardError=append:/var/log/wazuh-forwarder.log
+
+# Prevent the forwarder from competing with Wazuh/OpenSearch under demo load.
+CPUQuota=50%
+MemoryLimit=512M
 
 [Install]
 WantedBy=multi-user.target

@@ -1,96 +1,74 @@
-#!/bin/bash
-# CE 4309 Final Project - Demo Script
-# 
-# Architecture:
-#   Attacker (NixOS) -> Windows VM (Flask app) -> Wazuh Manager (detection) -> OpenSearch + Dashboard
-#
-# IMPORTANT: Dashboard must be started AFTER attacks to avoid VM overload
+#!/usr/bin/env bash
+# CE 4309 Final Project - Complete Demo Script
+set -u
 
-set -e
+VM="192.168.122.247"
+TARGET="192.168.122.10"
+DEMO_USER="live_demo_$(date +%H%M%S)"
+AI_LOG="/tmp/ai-agent-demo.log"
 
-WAZUH="wazuh"
-DASHBOARD_URL="https://192.168.122.247"
-OS_URL="https://192.168.122.247:9200"
+echo "=========================================="
+echo "CE 4309 Wazuh IDS Demo - Starting"
+echo "=========================================="
 
-echo "============================================"
-echo "  CE 4309 Final Project - Demo"
-echo "============================================"
+echo "[Step 1] Verify Wazuh Manager"
+ssh "wazuhadmin@$VM" "sudo /var/ossec/bin/wazuh-control status | head -15"
 
-# Step 1: Verify VMs
 echo ""
-echo "[1] Checking VMs..."
-ssh -o ConnectTimeout 5 $WAZUH "echo ok" >/dev/null 2>&1 && echo "  Wazuh VM: OK" || echo "  Wazuh VM: DOWN"
-curl -s http://192.168.122.10:5000/ >/dev/null 2>&1 && echo "  Defense VM: OK" || echo "  Defense VM: DOWN"
+echo "[Step 1b] Configure Stable Demo Services"
+ssh "wazuhadmin@$VM" "sudo systemctl stop wazuh-auto-response 2>/dev/null || true; sudo systemctl start wazuh-dashboard; sudo systemctl start wazuh-forwarder; systemctl is-active wazuh-dashboard wazuh-forwarder"
 
-# Step 2: Clean state
 echo ""
-echo "[2] Cleaning state..."
-ssh $WAZUH "sudo iptables -F INPUT" 2>/dev/null
-ssh $WAZuh "sudo /var/ossec/bin/agent_control -l" 2>/dev/null | grep "002" && echo "  Agent 002: Active" || echo "  Agent 002: Check needed"
+echo "[Step 2] Dashboard & OpenSearch"
+curl -sk -u admin:admin "https://$VM:9200/_cluster/health" | python3 -c "import sys,json; print('OpenSearch:', json.load(sys.stdin).get('status'))"
+ssh "wazuhadmin@$VM" "sudo systemctl is-active wazuh-dashboard"
 
-# Step 3: Ensure dashboard is OFF during attacks
 echo ""
-echo "[3] Ensuring dashboard is off during attacks..."
-DASH_STATUS=$(ssh $WAZUH "sudo systemctl is-active wazuh-dashboard" 2>/dev/null)
-if [ "$DASH_STATUS" = "active" ]; then
-    echo "  Stopping dashboard..."
-    ssh $WAZUH "sudo systemctl stop wazuh-dashboard" 2>/dev/null
-fi
-echo "  Dashboard: OFF"
+echo "[Step 3] Alert Count"
+curl -sk -u admin:admin "https://$VM:9200/wazuh-alerts-*/_count?q=rule.id:100101" | python3 -c "import sys,json; print('Total alerts:', json.load(sys.stdin).get('count'))"
 
-# Step 4: Send attacks
 echo ""
-echo "[4] Sending brute force attack (5 failed logins)..."
-for i in 1 2 3 4 5; do
-    curl -s -X POST "http://192.168.122.10:5000/" -d "username=attacker&password=wrong$i" > /dev/null
-    sleep 2
+echo "[Step 3b] Generate Fresh Attacks"
+rm -f "$AI_LOG"
+echo "Sending 3 fresh failed logins as user: $DEMO_USER"
+for i in 1 2 3; do
+  curl -s -o /dev/null -X POST "http://$TARGET:5000/" -d "username=$DEMO_USER&password=wrong$i"
 done
-echo "  Sent 5 failed login attempts"
-
-# Step 5: Wait for detection
-echo ""
-echo "[5] Waiting for detection (10s)..."
 sleep 10
 
-# Step 6: Show results
 echo ""
-echo "[6] Results..."
-echo ""
-echo "--- Detected Alerts ---"
-ALERT_COUNT=$(curl -sk -u admin:admin "$OS_URL/wazuh-alerts-*/_count?q=rule.id:100101" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['count'])" 2>/dev/null)
-echo "  OpenSearch: $ALERT_COUNT alerts indexed"
+echo "[Step 4] Latest Alert"
+ssh "wazuhadmin@$VM" "sudo tail -1 /var/ossec/logs/alerts/alerts.json" | python3 -c "import sys,json; d=json.load(sys.stdin); print('srcip:', d.get('data',{}).get('srcip')); print('user:', d.get('data',{}).get('dstuser')); print('status:', d.get('data',{}).get('cppbank_status'))"
 
 echo ""
-echo "--- Alert Details (srcip, user, status) ---"
-curl -sk -u admin:admin -X POST "$OS_URL/wazuh-alerts-*/_search" \
-  -H "Content-Type: application/json" \
-  -d '{"query":{"term":{"rule.id":"100101"}},"size":5,"sort":[{"timestamp":{"order":"desc"}}]}' 2>/dev/null | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for h in d.get('hits',{}).get('hits',[]):
-    s = h.get('_source',{})
-    data = s.get('data',{})
-    print(f'  {s.get(\"timestamp\",\"?\")[:19]} | srcip={data.get(\"srcip\",\"?\")} | user={data.get(\"dstuser\",\"?\")} | status={data.get(\"cppbank_status\",\"?\")}')
-" 2>/dev/null || echo "  (query failed)"
+echo "[Step 4b] Verify Fresh Alerts Are Indexed in OpenSearch"
+curl -sk -u admin:admin "https://$VM:9200/wazuh-alerts-*/_search" -H 'Content-Type: application/json' -d "{\"query\":{\"query_string\":{\"query\":\"$DEMO_USER\"}},\"size\":5,\"sort\":[{\"timestamp\":{\"order\":\"desc\"}}]}" | python3 -c "import sys,json; d=json.load(sys.stdin); hits=d.get('hits',{}).get('hits',[]); print('Fresh indexed alerts:', len(hits)); [print('  '+h.get('_source',{}).get('timestamp','?')+' srcip='+h.get('_source',{}).get('data',{}).get('srcip','?')+' user='+h.get('_source',{}).get('data',{}).get('dstuser','?')) for h in hits[:3]]"
 
 echo ""
-echo "--- Active Response ---"
-ssh $WAZUH "sudo tail -3 /var/ossec/logs/active-responses.log" 2>/dev/null || echo "  (log unavailable)"
+echo "[Step 4c] AI Agent Decision Log"
+cd /var/lib/hermes-agent-official/workspace || exit 1
+timeout 14 python3 -u ai-soc-agent.py > "$AI_LOG" 2>&1 || true
+cat "$AI_LOG"
 
 echo ""
-echo "--- Blocked IPs ---"
-ssh $WAZUH "sudo iptables -L INPUT -n | grep DROP" 2>/dev/null || echo "  (no blocks or iptables unavailable)"
-
-# Step 7: Start dashboard for visual demo
-echo ""
-echo "[7] Starting dashboard for visual demo..."
-ssh $WAZUH "sudo systemctl start wazuh-dashboard" 2>/dev/null
-echo "  Dashboard: ON"
-echo "  Open: $DASHBOARD_URL (admin/admin)"
+echo "[Step 4d] Verify AI Decision Is Visible in OpenSearch/Dashboard"
+curl -sk -u admin:admin "https://$VM:9200/wazuh-alerts-*/_search" -H 'Content-Type: application/json' -d "{\"query\":{\"term\":{\"rule.id\":\"100201\"}},\"size\":3,\"sort\":[{\"timestamp\":{\"order\":\"desc\"}}]}" | python3 -c "import sys,json; d=json.load(sys.stdin); hits=d.get('hits',{}).get('hits',[]); print('AI decision alerts:', len(hits)); [print('  '+h.get('_source',{}).get('timestamp','?')+' action='+h.get('_source',{}).get('data',{}).get('ai_action','?')+' srcip='+h.get('_source',{}).get('data',{}).get('srcip','?')) for h in hits]"
 
 echo ""
-echo "============================================"
-echo "  Demo complete!"
-echo "  Dashboard: $DASHBOARD_URL"
-echo "  OpenSearch: $OS_URL"
-echo "============================================"
+echo "[Step 5] Manual Active Response Test"
+TEST_BLOCK_IP="192.168.122.250"
+ssh "wazuhadmin@$VM" "sudo iptables -D INPUT -s $TEST_BLOCK_IP -j DROP 2>/dev/null || true; echo '$TEST_BLOCK_IP add' | sudo /var/ossec/active-response/bin/custom-firewall-drop; sudo iptables -C INPUT -s $TEST_BLOCK_IP -j DROP && echo 'Verified block for $TEST_BLOCK_IP'"
+ssh "wazuhadmin@$VM" "sudo iptables -L INPUT -n --line-numbers | grep DROP"
+
+echo ""
+echo "[Step 6] AI SOC Agent Demo"
+echo "AI agent was already exercised in Step 3b/4c."
+echo "Note: 192.168.122.1 is protected because it is the admin/demo host."
+echo "A separate attacker laptop/IP will be automatically blocked by the AI agent."
+echo "For separate attackers, AI blocks both Wazuh manager iptables and Windows Defender firewall TCP/5000."
+echo "AI decisions are indexed as rule.id=100201 for dashboard visibility."
+
+echo ""
+echo "=========================================="
+echo "Demo Complete"
+echo "=========================================="

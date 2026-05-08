@@ -9,7 +9,7 @@ from pathlib import Path
 OPENSEARCH = "https://localhost:9200"
 AUTH = ("admin", "admin")
 ALERTS_FILE = "/var/ossec/logs/alerts/alerts.json"
-INDEX_NAME = f"wazuh-alerts-4.x-{time.strftime('%Y.%m.%d')}"
+INDEX_NAME = os.environ.get("WAZUH_FORWARDER_INDEX", f"wazuh-alerts-4.x-{time.strftime('%Y.%m.%d')}")
 LOG_FILE = "/var/log/wazuh-forwarder.log"
 STATE_FILE = "/var/lib/wazuh-forwarder/offset.txt"
 
@@ -44,6 +44,11 @@ def forward_alerts():
         return
     
     last_offset = get_last_offset()
+    
+    if last_offset > file_size:
+        log(f"Offset {last_offset} beyond alerts file size {file_size}; resetting to 0")
+        last_offset = 0
+        save_offset(0)
     
     if file_size <= last_offset:
         return
