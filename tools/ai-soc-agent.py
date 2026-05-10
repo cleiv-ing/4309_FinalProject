@@ -10,10 +10,10 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import urllib.request
 
-OPENSEARCH_URL  = "https://192.168.122.247:9200/"
-OPENSEARCH_USER = "admin"
-OPENSEARCH_PASS = "admin"
-WAZUH_SSH       = "wazuh"
+OPENSEARCH_URL  = os.environ.get("AI_SOC_OPENSEARCH_URL", "https://192.168.122.247:9200/")
+OPENSEARCH_USER = os.environ.get("AI_SOC_OPENSEARCH_USER", "admin")
+OPENSEARCH_PASS = os.environ.get("AI_SOC_OPENSEARCH_PASS", "admin")
+WAZUH_SSH       = os.environ.get("AI_SOC_WAZUH_SSH", "wazuh")
 DEFENSE_SSH     = os.environ.get("AI_SOC_DEFENSE_SSH", "defense@192.168.122.10")
 DEFENSE_APP_PORT = os.environ.get("AI_SOC_DEFENSE_APP_PORT", "5000")
 RULE_ID         = "100101"

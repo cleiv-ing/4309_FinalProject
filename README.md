@@ -417,6 +417,23 @@ ssh wazuh "sudo iptables -L INPUT -n | grep DROP"
 
 ## Part 5: Demo Script
 
+The default scripts use the single-laptop NAT lab IPs (`192.168.122.247` for Wazuh and `192.168.122.10` for the Windows defense VM). For a same-WiFi bridged demo, keep the same code and pass the new IPs at runtime:
+
+```bash
+WAZUH_VM=<wazuh-vm-wifi-ip> \
+DEFENSE_TARGET=<windows-vm-wifi-ip> \
+AI_SOC_WAZUH_SSH=wazuhadmin@<wazuh-vm-wifi-ip> \
+bash demo.sh
+```
+
+To run only the AI agent with bridged IPs:
+
+```bash
+AI_SOC_OPENSEARCH_URL=https://<wazuh-vm-wifi-ip>:9200/ \
+AI_SOC_WAZUH_SSH=wazuhadmin@<wazuh-vm-wifi-ip> \
+python3 -u tools/ai-soc-agent.py
+```
+
 ### Terminal 1 - Watch AR triggers:
 ```bash
 ssh wazuh "sudo tail -f /var/ossec/logs/active-responses.log"

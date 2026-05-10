@@ -2,26 +2,33 @@
 # CE 4309 Final Project - Complete Demo Script
 set -u
 
-VM="192.168.122.247"
-TARGET="192.168.122.10"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VM="${WAZUH_VM:-192.168.122.247}"
+TARGET="${DEFENSE_TARGET:-192.168.122.10}"
+SSH_USER="${WAZUH_SSH_USER:-wazuhadmin}"
+SSH_TARGET="${WAZUH_SSH:-$SSH_USER@$VM}"
+AI_AGENT="${AI_SOC_AGENT:-$ROOT_DIR/tools/ai-soc-agent.py}"
 DEMO_USER="live_demo_$(date +%H%M%S)"
 AI_LOG="/tmp/ai-agent-demo.log"
 
 echo "=========================================="
 echo "CE 4309 Wazuh IDS Demo - Starting"
 echo "=========================================="
+echo "Wazuh VM:  $VM"
+echo "Defense:   $TARGET"
+echo "SSH target: $SSH_TARGET"
 
 echo "[Step 1] Verify Wazuh Manager"
-ssh "wazuhadmin@$VM" "sudo /var/ossec/bin/wazuh-control status | head -15"
+ssh "$SSH_TARGET" "sudo /var/ossec/bin/wazuh-control status | head -15"
 
 echo ""
 echo "[Step 1b] Configure Stable Demo Services"
-ssh "wazuhadmin@$VM" "sudo systemctl stop wazuh-auto-response 2>/dev/null || true; sudo systemctl start wazuh-dashboard; sudo systemctl start wazuh-forwarder; systemctl is-active wazuh-dashboard wazuh-forwarder"
+ssh "$SSH_TARGET" "sudo systemctl stop wazuh-auto-response 2>/dev/null || true; sudo systemctl start wazuh-dashboard; sudo systemctl start wazuh-forwarder; systemctl is-active wazuh-dashboard wazuh-forwarder"
 
 echo ""
 echo "[Step 2] Dashboard & OpenSearch"
 curl -sk -u admin:admin "https://$VM:9200/_cluster/health" | python3 -c "import sys,json; print('OpenSearch:', json.load(sys.stdin).get('status'))"
-ssh "wazuhadmin@$VM" "sudo systemctl is-active wazuh-dashboard"
+ssh "$SSH_TARGET" "sudo systemctl is-active wazuh-dashboard"
 
 echo ""
 echo "[Step 3] Alert Count"
@@ -38,7 +45,7 @@ sleep 10
 
 echo ""
 echo "[Step 4] Latest Alert"
-ssh "wazuhadmin@$VM" "sudo tail -1 /var/ossec/logs/alerts/alerts.json" | python3 -c "import sys,json; d=json.load(sys.stdin); print('srcip:', d.get('data',{}).get('srcip')); print('user:', d.get('data',{}).get('dstuser')); print('status:', d.get('data',{}).get('cppbank_status'))"
+ssh "$SSH_TARGET" "sudo tail -1 /var/ossec/logs/alerts/alerts.json" | python3 -c "import sys,json; d=json.load(sys.stdin); print('srcip:', d.get('data',{}).get('srcip')); print('user:', d.get('data',{}).get('dstuser')); print('status:', d.get('data',{}).get('cppbank_status'))"
 
 echo ""
 echo "[Step 4b] Verify Fresh Alerts Are Indexed in OpenSearch"
@@ -46,8 +53,9 @@ curl -sk -u admin:admin "https://$VM:9200/wazuh-alerts-*/_search" -H 'Content-Ty
 
 echo ""
 echo "[Step 4c] AI Agent Decision Log"
-cd /var/lib/hermes-agent-official/workspace || exit 1
-timeout 14 python3 -u ai-soc-agent.py > "$AI_LOG" 2>&1 || true
+AI_SOC_OPENSEARCH_URL="${AI_SOC_OPENSEARCH_URL:-https://$VM:9200/}" \
+AI_SOC_WAZUH_SSH="${AI_SOC_WAZUH_SSH:-$SSH_TARGET}" \
+timeout 14 python3 -u "$AI_AGENT" > "$AI_LOG" 2>&1 || true
 cat "$AI_LOG"
 
 echo ""
@@ -57,8 +65,8 @@ curl -sk -u admin:admin "https://$VM:9200/wazuh-alerts-*/_search" -H 'Content-Ty
 echo ""
 echo "[Step 5] Manual Active Response Test"
 TEST_BLOCK_IP="192.168.122.250"
-ssh "wazuhadmin@$VM" "sudo iptables -D INPUT -s $TEST_BLOCK_IP -j DROP 2>/dev/null || true; echo '$TEST_BLOCK_IP add' | sudo /var/ossec/active-response/bin/custom-firewall-drop; sudo iptables -C INPUT -s $TEST_BLOCK_IP -j DROP && echo 'Verified block for $TEST_BLOCK_IP'"
-ssh "wazuhadmin@$VM" "sudo iptables -L INPUT -n --line-numbers | grep DROP"
+ssh "$SSH_TARGET" "sudo iptables -D INPUT -s $TEST_BLOCK_IP -j DROP 2>/dev/null || true; echo '$TEST_BLOCK_IP add' | sudo /var/ossec/active-response/bin/custom-firewall-drop; sudo iptables -C INPUT -s $TEST_BLOCK_IP -j DROP && echo 'Verified block for $TEST_BLOCK_IP'"
+ssh "$SSH_TARGET" "sudo iptables -L INPUT -n --line-numbers | grep DROP"
 
 echo ""
 echo "[Step 6] AI SOC Agent Demo"
