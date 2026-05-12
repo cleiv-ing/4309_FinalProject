@@ -67,6 +67,19 @@ def get_new_alerts():
         return []
     return [h["_source"] for h in result["hits"]["hits"]]
 
+def parse_alert_time(alert):
+    ts = alert.get("@timestamp") or alert.get("timestamp", "")
+    if not ts:
+        return None
+    ts = ts.replace("Z", "+00:00")
+    # Python accepts -07:00 reliably; normalize Wazuh's -0700/+0000 form.
+    if len(ts) >= 5 and (ts[-5] in "+-" and ts[-2] != ":"):
+        ts = f"{ts[:-2]}:{ts[-2:]}"
+    parsed = datetime.fromisoformat(ts)
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
 def analyze(alerts):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     cutoff = now - timedelta(seconds=BRUTE_FORCE_WINDOW)
@@ -76,7 +89,9 @@ def analyze(alerts):
         if not srcip or srcip == "127.0.0.1":
             continue
         try:
-            ts = datetime.fromisoformat(alert["timestamp"].replace("Z", "+00:00").split("+")[0])
+            ts = parse_alert_time(alert)
+            if ts is None:
+                continue
             ip_attempts[srcip].append((ts, user))
         except:
             pass
